@@ -30,8 +30,7 @@
 #include "point-to-point-channel.h"
 #include "ppp-header.h"
 
-#include "ns3/ipv4-header.h"
-#include "ns3/tcp-header.h"
+#include "ns3/object-factory.h"
 
 namespace ns3 {
 
@@ -429,20 +428,8 @@ PointToPointNetDevice::Receive (Ptr<Packet> packet)
         std::map<fid_t, FlowState>::iterator fit = flow_info.find(fid);
         if (fit == flow_info.end()){
           NS_LOG_DEBUG("New Flow");
-          FlowState s = {
-            .state = SETUP,
-            .setup_state = NONE,
-            .cc_state = START,
-            .cc_ss_threshold = 20,
-            .cm_window_size = 1,
-            .max_ack__val = 0,
-            .new_ack__val = 0,
-            .dup_acks__val = 0,
-            .dup_acks__first_ack = true,
-            .max_sent__val = 0,
-            .rtx_timeout__val = false,
-          };
-
+          FlowState s;
+          RenoInit(s);
           flow_info[fid] = s;
           fit = flow_info.find(fid);
         }
@@ -494,6 +481,10 @@ PointToPointNetDevice::Receive (Ptr<Packet> packet)
             }
             else{
               NS_LOG_DEBUG("No Payload");
+            }
+            uint8_t flags = tcp.GetFlags();
+            if ((flags & TcpHeader::ACK) > 0){
+              Reno(packet, ipv4, tcp, st, ACK_RCVD);
             }
             break;
           }
@@ -644,9 +635,57 @@ PointToPointNetDevice::IsBridge (void) const
   return false;
 }
 
-void PointToPointNetDevice::Reno(Ptr<Packet> packet, 
-                                 FlowState& st){
+void PointToPointNetDevice::RenoInit(FlowState& st){
+  st = {
+    .state = SETUP,
+    .setup_state = NONE,
+    .cc_state = START,
+    .cc_ss_threshold = 20,
+    .cm_window_size = 1,
+    .max_ack__val = 0,
+    .new_ack__val = 0,
+    .dup_acks__val = 0,
+    .dup_acks__first_ack = true,
+    .max_sent__val = 0,
+    .rtx_timeout__val = false,
+  };
+
+}
+
+void PointToPointNetDevice::CoCoASched(){
+  NS_LOG_DEBUG("In CoCoA Sched");
+}
+
+void PointToPointNetDevice::Reno(Ptr<Packet> packet,
+                                 const Ipv4Header& ipv4,
+                                 const TcpHeader& tcp,
+                                 FlowState& st,
+                                 CCEvent ev){
   NS_LOG_DEBUG("RENO");
+  switch(ev){
+    case PKT_ENQ:{
+      // CM Code
+      st.queue.push(packet);
+      NS_LOG_DEBUG("PKT ENQ");
+      // Event Code
+      if (queues_empty){
+        Simulator::ScheduleNow(&PointToPointNetDevice::CoCoASched, this); 
+      }
+      break;
+    }
+    case PKT_DEQ:{
+      NS_LOG_DEBUG("PKT_DEQ");
+      break;
+    }
+    case PKT_SENT:{
+      NS_LOG_DEBUG("PKT_SENT");
+      break;
+    }
+    case ACK_RCVD:{
+      NS_LOG_DEBUG("ACK_RCVD");
+      break;
+    }
+  }
 }
 
 bool
@@ -667,7 +706,7 @@ PointToPointNetDevice::Send (
   TcpHeader tcp;
   packet->PeekHeader(tcp);
   packet->AddHeader(ipv4);
-  
+ 
   if (GetNode()->GetId() == 0){
     typedef std::tuple<Ipv4Address, uint16_t, Ipv4Address, uint16_t, uint8_t> fid_t;
     
@@ -684,20 +723,8 @@ PointToPointNetDevice::Send (
     std::map<fid_t, FlowState>::iterator fit = flow_info.find(fid);
     if (fit == flow_info.end()){
       NS_LOG_DEBUG("New Flow");
-      FlowState s = {
-        .state = SETUP,
-        .setup_state = NONE,
-        .cc_state = START,
-        .cc_ss_threshold = 20,
-        .cm_window_size = 1,
-        .max_ack__val = 0,
-        .new_ack__val = 0,
-        .dup_acks__val = 0,
-        .dup_acks__first_ack = true,
-        .max_sent__val = 0,
-        .rtx_timeout__val = false,
-      };
-
+      FlowState s;
+      RenoInit(s);
       flow_info[fid] = s;
       fit = flow_info.find(fid);
     }
@@ -751,7 +778,7 @@ PointToPointNetDevice::Send (
           uint16_t data_size = ipv4.GetPayloadSize() - tcp.GetLength() * 4;
           if (data_size > 0){
             NS_LOG_DEBUG("Payload size " << data_size);
-            Reno(packet, st);
+            Reno(packet, ipv4, tcp, st, PKT_ENQ);
           }
           else{
             NS_LOG_DEBUG("No Payload");

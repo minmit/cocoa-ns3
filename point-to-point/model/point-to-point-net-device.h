@@ -22,6 +22,8 @@
 #include <cstring>
 #include <map>
 #include <tuple>
+#include <queue>
+
 #include "ns3/address.h"
 #include "ns3/node.h"
 #include "ns3/net-device.h"
@@ -35,6 +37,8 @@
 
 #include "ns3/ipv4-address.h"
 #include "ns3/sequence-number.h"
+#include "ns3/ipv4-header.h"
+#include "ns3/tcp-header.h"
 
 namespace ns3 {
 
@@ -485,6 +489,8 @@ private:
    * mappings to keep flow information
    */
 private:
+  bool queues_empty = true;
+  
   enum TCPState{
     SETUP,
     DATA,
@@ -507,7 +513,15 @@ private:
     IDLE,
   };
 
+  enum CCEvent{
+    PKT_ENQ,
+    PKT_DEQ,
+    PKT_SENT,
+    ACK_RCVD,
+  };
+
   struct FlowState{
+    std::queue<Ptr<Packet> > queue;
     TCPState state;
     TCPSetupState setup_state;
     bool initiator;
@@ -537,7 +551,9 @@ private:
 
   std::map<std::tuple<Ipv4Address, uint16_t, Ipv4Address, uint16_t, uint8_t>, FlowState> flow_info;
 
-  void Reno(Ptr<Packet>, FlowState&);
+  void CoCoASched();
+  void RenoInit(FlowState&);
+  void Reno(Ptr<Packet>, const Ipv4Header&, const TcpHeader&, FlowState&, CCEvent);
 };
 
 } // namespace ns3
