@@ -653,7 +653,45 @@ void PointToPointNetDevice::RenoInit(FlowState& st){
 }
 
 void PointToPointNetDevice::CoCoASched(){
+  typedef std::tuple<Ipv4Address, uint16_t, Ipv4Address, uint16_t, uint8_t> fid_t;
   NS_LOG_DEBUG("In CoCoA Sched");
+  std::map<fid_t, FlowState>::iterator it;
+  int32_t qlen = -1;
+  bool queue_full = false;
+  while ((int32_t)m_queue->GetNPackets() > qlen && !queue_full){
+    qlen = m_queue->GetNPackets();
+    for (it = flow_info.begin(); it != flow_info.end(); it++){
+      FlowState& st = it->second;
+      NS_LOG_DEBUG("flow queue size " << st.queue.size());
+      if (!st.queue.empty()){
+        bool res = m_queue->Enqueue(st.queue.front());
+        if (res){
+          st.queue.pop();
+        }
+        else{
+          queue_full = true;
+          break;
+        }
+      }
+    }
+  }
+
+  NS_LOG_DEBUG("m_queue length " << m_queue->GetNPackets());
+
+  queues_empty = !queue_full;
+  if (queue_full){
+    Simulator::Schedule(NanoSeconds(1), &PointToPointNetDevice::CoCoASched, this);
+  }
+  //
+  // If the channel is ready for transition we send the packet right now
+  // 
+  if (m_txMachineState == READY && m_queue->GetNPackets() > 0){
+    Ptr<Packet> packet = m_queue->Dequeue ();
+    m_snifferTrace (packet);
+    m_promiscSnifferTrace (packet);
+    NS_LOG_DEBUG("starting to transmit packet");
+    TransmitStart (packet);
+  }
 }
 
 void PointToPointNetDevice::Reno(Ptr<Packet> packet,
@@ -698,6 +736,17 @@ PointToPointNetDevice::Send (
   NS_LOG_LOGIC ("p=" << packet << ", dest=" << &dest);
   NS_LOG_LOGIC ("UID is " << packet->GetUid ());
 
+  // If IsLinkUp() is false it means there is no channel to send any packet 
+  // over so we just hit the drop trace on the packet and return an error.
+  //
+  if (IsLinkUp () == false)
+    {
+      m_macTxDropTrace (packet);
+      return false;
+    }
+
+  
+  
   // COCOA Start
   //
  
@@ -706,7 +755,15 @@ PointToPointNetDevice::Send (
   TcpHeader tcp;
   packet->PeekHeader(tcp);
   packet->AddHeader(ipv4);
- 
+
+  //
+  // Stick a point to point protocol header on the packet in preparation for
+  // shoving it out the door.
+  //
+  AddHeader (packet, protocolNumber);
+
+  m_macTxTrace (packet);
+  
   if (GetNode()->GetId() == 0){
     typedef std::tuple<Ipv4Address, uint16_t, Ipv4Address, uint16_t, uint8_t> fid_t;
     
@@ -730,6 +787,7 @@ PointToPointNetDevice::Send (
     }
 
     FlowState& st = fit->second;
+    TCPState cur_st = st.state;
     switch(st.state){
       case SETUP:{
         switch(st.setup_state){
@@ -795,50 +853,59 @@ PointToPointNetDevice::Send (
                 tcp.GetSourcePort() << " " << ipv4.GetDestination() <<
                 " " << tcp.GetDestinationPort() << " " << ipv4.GetProtocol());
     NS_LOG_DEBUG("---------------------------");
-  }
-  
-  // COCOA End
-  //
-  // If IsLinkUp() is false it means there is no channel to send any packet 
-  // over so we just hit the drop trace on the packet and return an error.
-  //
-  if (IsLinkUp () == false)
-    {
-      m_macTxDropTrace (packet);
-      return false;
-    }
-
-  //
-  // Stick a point to point protocol header on the packet in preparation for
-  // shoving it out the door.
-  //
-  AddHeader (packet, protocolNumber);
-
-  m_macTxTrace (packet);
-
-  //
-  // We should enqueue and dequeue the packet to hit the tracing hooks.
-  //
-  if (m_queue->Enqueue (packet))
-    {
+    if (cur_st != DATA){
+      // We should enqueue and dequeue the packet to hit the tracing hooks.
       //
-      // If the channel is ready for transition we send the packet right now
-      // 
-      if (m_txMachineState == READY)
-        {
+      if (m_queue->Enqueue (packet)){
+        //
+        // If the channel is ready for transition we send the packet right now
+        // 
+        if (m_txMachineState == READY){
           packet = m_queue->Dequeue ();
           m_snifferTrace (packet);
           m_promiscSnifferTrace (packet);
           bool ret = TransmitStart (packet);
           return ret;
         }
-      return true;
+        return true;
+      }
+      //
+      // Enqueue may fail (overflow)
+      //
+      m_macTxDropTrace (packet);
+      return false;
     }
 
-  // Enqueue may fail (overflow)
-
-  m_macTxDropTrace (packet);
-  return false;
+    return true;
+  }
+  else{
+        
+    //
+    // We should enqueue and dequeue the packet to hit the tracing hooks.
+    //
+    if (m_queue->Enqueue (packet)){
+      //
+      // If the channel is ready for transition we send the packet right now
+      // 
+      if (m_txMachineState == READY){
+        packet = m_queue->Dequeue ();
+        m_snifferTrace (packet);
+        m_promiscSnifferTrace (packet);
+        bool ret = TransmitStart (packet);
+        return ret;
+      }
+      return true;
+    }
+    //
+    // Enqueue may fail (overflow)
+    //
+    m_macTxDropTrace (packet);
+    return false;
+  }
+  // COCOA End
+  //
+  
+  
 }
 
 bool
