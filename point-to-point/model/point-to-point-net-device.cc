@@ -707,6 +707,7 @@ void PointToPointNetDevice::Reno(Ptr<Packet> packet,
       NS_LOG_DEBUG("PKT ENQ");
       // Event Code
       if (queues_empty){
+        queues_empty = false;
         Simulator::ScheduleNow(&PointToPointNetDevice::CoCoASched, this); 
       }
       break;
@@ -832,20 +833,41 @@ PointToPointNetDevice::Send (
       }
       case DATA: {
         uint8_t flags = tcp.GetFlags();
-        if ((flags & TcpHeader::FIN) == 0){
-          uint16_t data_size = ipv4.GetPayloadSize() - tcp.GetLength() * 4;
-          if (data_size > 0){
-            NS_LOG_DEBUG("Payload size " << data_size);
-            Reno(packet, ipv4, tcp, st, PKT_ENQ);
-          }
-          else{
-            NS_LOG_DEBUG("No Payload");
-          }
+        uint16_t data_size = ipv4.GetPayloadSize() - tcp.GetLength() * 4;
+        if (data_size > 0){
+          NS_LOG_DEBUG("Payload size " << data_size);
+          Reno(packet, ipv4, tcp, st, PKT_ENQ);
           break;
         }
+        else if ((flags & TcpHeader::FIN) != 0){
+          // We should enqueue and dequeue the packet to hit the tracing hooks.
+          //
+          if (m_queue->Enqueue (packet)){
+            //
+            // If the channel is ready for transition we send the packet right now
+            // 
+            if (m_txMachineState == READY){
+              packet = m_queue->Dequeue ();
+              m_snifferTrace (packet);
+              m_promiscSnifferTrace (packet);
+              bool ret = TransmitStart (packet);
+              return ret;
+            }
+          }
+          //
+          // Enqueue may fail (overflow)
+          //
+          m_macTxDropTrace (packet);
+          return false;
+        }
+        else{
+          st.state = TEAR_DOWN;
+          cur_st = TEAR_DOWN;
+        }
       }
-      case TEAR_DOWN:
+      case TEAR_DOWN:{
         NS_LOG_DEBUG("In Tear Down");
+      }
     }
   
     NS_LOG_DEBUG("TCP Header " << tcp);
