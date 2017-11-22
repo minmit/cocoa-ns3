@@ -317,6 +317,42 @@ PointToPointNetDevice::TransmitComplete (void)
   NS_ASSERT_MSG (m_currentPkt != 0, "PointToPointNetDevice::TransmitComplete(): m_currentPkt zero");
 
   m_phyTxEndTrace (m_currentPkt);
+
+  // CoCoA Start
+  if (GetNode()->GetId() == 0){
+
+    PppHeader phdr;
+    m_currentPkt->RemoveHeader(phdr);
+    Ipv4Header ipv4;
+    m_currentPkt->RemoveHeader(ipv4);
+    TcpHeader tcp;
+    m_currentPkt->PeekHeader(tcp);
+    m_currentPkt->AddHeader(ipv4);
+    m_currentPkt->AddHeader(phdr);
+
+    typedef std::tuple<Ipv4Address, uint16_t, Ipv4Address, uint16_t, uint8_t> fid_t;
+      
+    // Compute FID. Assuming that all packets going out are from
+    // IP address on this machine, we can avoid sorting the addresses
+    // and always put the local side first and the remote side second
+    // something to change later (TODO).
+    fid_t fid(std::make_tuple(ipv4.GetSource(), tcp.GetSourcePort(),
+                              ipv4.GetDestination(), tcp.GetDestinationPort(),
+                              ipv4.GetProtocol()));
+    
+
+    std::map<fid_t, FlowState>::iterator fit = flow_info.find(fid);
+    // Check for sender-size info Payload if Data or SYN or FIN
+    if (fit != flow_info.end()){
+      FlowState& st = fit->second;
+      Reno(m_currentPkt, ipv4, tcp, st, PKT_SENT);
+    }
+    else{
+      NS_LOG_DEBUG("SHOULD NOT GET HERE!");
+    }
+  }
+  // CoCoA End
+  
   m_currentPkt = 0;
 
   Ptr<Packet> p = m_queue->Dequeue ();
@@ -644,10 +680,12 @@ void PointToPointNetDevice::RenoInit(FlowState& st){
     .cm_window_size = 1,
     .max_ack__val = 0,
     .new_ack__val = 0,
+    .new_ack__ack_num = 0,
     .dup_acks__val = 0,
     .dup_acks__first_ack = true,
     .max_sent__val = 0,
     .rtx_timeout__val = false,
+    .rtx_timeout__timer__isset = false,
   };
 
 }
@@ -662,15 +700,34 @@ void PointToPointNetDevice::CoCoASched(){
     qlen = m_queue->GetNPackets();
     for (it = flow_info.begin(); it != flow_info.end(); it++){
       FlowState& st = it->second;
-      NS_LOG_DEBUG("flow queue size " << st.queue.size());
+      NS_LOG_DEBUG("flow info: queue size " << st.queue.size() <<
+                   " window start/size " << st.cm_start << "/" << st.cm_window_size);
       if (!st.queue.empty()){
-        bool res = m_queue->Enqueue(st.queue.front());
-        if (res){
-          st.queue.pop();
-        }
-        else{
-          queue_full = true;
-          break;
+        Ptr<Packet> p = st.queue.front();
+
+        PppHeader phdr;
+        p->RemoveHeader(phdr);
+        Ipv4Header ipv4;
+        p->RemoveHeader(ipv4);
+        TcpHeader tcp;
+        p->PeekHeader(tcp);
+        p->AddHeader(ipv4);
+        p->AddHeader(phdr);
+
+        uint16_t data_size = ipv4.GetPayloadSize() - tcp.GetLength() * 4;
+        uint32_t seq = tcp.GetSequenceNumber().GetValue();
+        if ((seq >= st.cm_start) && 
+            (seq + data_size <= st.cm_start + st.cm_window_size * MSS)){
+
+          bool res = m_queue->Enqueue(p);
+          if (res){
+              st.queue.pop();
+              Reno(p, ipv4, tcp, st, PKT_DEQ);
+          }
+          else{
+            queue_full = true;
+            break;
+          }
         }
       }
     }
@@ -700,6 +757,7 @@ void PointToPointNetDevice::Reno(Ptr<Packet> packet,
                                  FlowState& st,
                                  CCEvent ev){
   NS_LOG_DEBUG("RENO");
+  
   switch(ev){
     case PKT_ENQ:{
       // CM Code
@@ -718,13 +776,60 @@ void PointToPointNetDevice::Reno(Ptr<Packet> packet,
     }
     case PKT_SENT:{
       NS_LOG_DEBUG("PKT_SENT");
+      uint16_t data_size = ipv4.GetPayloadSize() - tcp.GetLength() * 4;
+      uint32_t sent = tcp.GetSequenceNumber().GetValue() + data_size;
+      if (sent > st.max_sent__val){
+        st.max_sent__val = sent;
+      }
+
+      /*if (!st.rtx_timeout__timer__isset &&
+          st.max_sent__val > st.max_ack__val){
+        st.rtx_timeout__timer__isset = true;
+        Simulator::Schedule(MilliSeconds(200), 
+            &PointToPointNetDevice::rtx_timeout__timeout, this);
+      }*/
+
       break;
     }
     case ACK_RCVD:{
       NS_LOG_DEBUG("ACK_RCVD");
+      uint32_t ack = tcp.GetAckNumber().GetValue();
+      if (ack > st.cm_start){
+        st.cm_start = ack;
+      }
+      
+      if (ack > st.max_ack__val){
+        st.max_ack__val = ack;
+      }
+      
+      if ((ack == st.max_ack__val) &&
+          (st.max_ack__val > st.new_ack__ack_num)){
+        st.new_ack__ack_num = ack;
+        st.new_ack__val = true;
+      }
+      else{
+        st.new_ack__val = false;
+      }
+
+      if (st.dup_acks__first_ack){
+        st.dup_acks__first_ack = false;
+        st.dup_acks__last_ack = ack;
+      }
+      else if (st.dup_acks__last_ack == ack){
+        st.dup_acks__val += 1;
+      }
+      else{
+        st.dup_acks__last_ack = ack;
+        st.dup_acks__val = 0;
+      }
+
       break;
     }
   }
+  /*NS_LOG_DEBUG("max ack " << st.max_ack__val <<
+               " new_ack " << st.new_ack__val <<
+               " dup_ack " << st.dup_acks__val <<
+               " max_sent " << st.max_sent__val); */
 }
 
 bool
@@ -796,10 +901,10 @@ PointToPointNetDevice::Send (
             uint8_t flags = tcp.GetFlags();
             if ((flags & TcpHeader::SYN) > 0 &&
                 (flags & !(TcpHeader::SYN)) == 0){
-              NS_LOG_DEBUG("SYN");
               st.initiator = true;
               st.setup_state = SYN;
               st.init_seq = tcp.GetSequenceNumber();
+              st.cm_start = st.init_seq.GetValue();
             }
             break;
           }
@@ -809,9 +914,9 @@ PointToPointNetDevice::Send (
                 (flags & TcpHeader::SYN) > 0 &&
                 (flags & TcpHeader::ACK) > 0 &&
                 (flags & !(TcpHeader::SYN) & !(TcpHeader::ACK)) == 0){
-              NS_LOG_DEBUG("SYN_ACK");
               st.setup_state = SYN_ACK;
               st.init_seq = tcp.GetSequenceNumber();
+              st.cm_start = st.init_seq.GetValue();
             }
             break;
           }

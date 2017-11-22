@@ -490,7 +490,8 @@ private:
    */
 private:
   bool queues_empty = true;
-  
+  uint32_t MSS = 536;
+
   enum TCPState{
     SETUP,
     DATA,
@@ -547,6 +548,7 @@ private:
     uint32_t max_sent__val;
     
     bool rtx_timeout__val;
+    bool rtx_timeout__timer__isset;
   };
 
   std::map<std::tuple<Ipv4Address, uint16_t, Ipv4Address, uint16_t, uint8_t>, FlowState> flow_info;
