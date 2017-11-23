@@ -35,6 +35,8 @@
 #include "ns3/ptr.h"
 #include "ns3/mac48-address.h"
 
+#include "ns3/nstime.h"
+#include "ns3/event-id.h"
 #include "ns3/ipv4-address.h"
 #include "ns3/sequence-number.h"
 #include "ns3/ipv4-header.h"
@@ -549,10 +551,13 @@ private:
     
     bool rtx_timeout__val;
     bool rtx_timeout__timer__isset;
+    uint32_t rtx_timeout__timeout_cnt;
+    Time rtx_timeout__timer_delay;
   };
 
   std::map<std::tuple<Ipv4Address, uint16_t, Ipv4Address, uint16_t, uint8_t>, FlowState> flow_info;
 
+  void rtx_timeout__timeout(Ipv4Header, TcpHeader, uint32_t);
   void CoCoASched();
   void RenoInit(FlowState&);
   void Reno(Ptr<Packet>, const Ipv4Header&, const TcpHeader&, FlowState&, CCEvent);

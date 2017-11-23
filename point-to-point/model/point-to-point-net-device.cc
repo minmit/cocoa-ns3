@@ -30,7 +30,6 @@
 #include "point-to-point-channel.h"
 #include "ppp-header.h"
 
-#include "ns3/object-factory.h"
 
 namespace ns3 {
 
@@ -686,6 +685,8 @@ void PointToPointNetDevice::RenoInit(FlowState& st){
     .max_sent__val = 0,
     .rtx_timeout__val = false,
     .rtx_timeout__timer__isset = false,
+    .rtx_timeout__timeout_cnt = 0,
+    .rtx_timeout__timer_delay = MilliSeconds(500),
   };
 
 }
@@ -782,12 +783,16 @@ void PointToPointNetDevice::Reno(Ptr<Packet> packet,
         st.max_sent__val = sent;
       }
 
-      /*if (!st.rtx_timeout__timer__isset &&
+      if (!st.rtx_timeout__timer__isset &&
           st.max_sent__val > st.max_ack__val){
+        st.rtx_timeout__val = false;
         st.rtx_timeout__timer__isset = true;
-        Simulator::Schedule(MilliSeconds(200), 
-            &PointToPointNetDevice::rtx_timeout__timeout, this);
-      }*/
+        st.rtx_timeout__timeout_cnt++;
+        Simulator::Schedule(st.rtx_timeout__timer_delay, 
+            &PointToPointNetDevice::rtx_timeout__timeout, this, 
+                                               ipv4, tcp, st.rtx_timeout__timeout_cnt);
+        NS_LOG_DEBUG("event id " << st.rtx_timeout__timeout_cnt);
+      }
 
       break;
     }
@@ -823,6 +828,15 @@ void PointToPointNetDevice::Reno(Ptr<Packet> packet,
         st.dup_acks__val = 0;
       }
 
+      if (st.new_ack__val || st.dup_acks__val == 3){
+        st.rtx_timeout__val = false;
+        st.rtx_timeout__timer__isset = true;
+        st.rtx_timeout__timeout_cnt++;
+        Simulator::Schedule(st.rtx_timeout__timer_delay, &PointToPointNetDevice::rtx_timeout__timeout, 
+                                                this, ipv4, tcp, st.rtx_timeout__timeout_cnt);
+        NS_LOG_DEBUG("event id " << st.rtx_timeout__timeout_cnt);
+
+      }
       break;
     }
   }
@@ -830,6 +844,38 @@ void PointToPointNetDevice::Reno(Ptr<Packet> packet,
                " new_ack " << st.new_ack__val <<
                " dup_ack " << st.dup_acks__val <<
                " max_sent " << st.max_sent__val); */
+}
+
+void PointToPointNetDevice::rtx_timeout__timeout(Ipv4Header ipv4, TcpHeader tcp, uint32_t cnt){
+  typedef std::tuple<Ipv4Address, uint16_t, Ipv4Address, uint16_t, uint8_t> fid_t;
+  //TODO: FIXME
+  fid_t fid1(std::make_tuple(ipv4.GetSource(), tcp.GetSourcePort(),
+                              ipv4.GetDestination(), tcp.GetDestinationPort(),
+                              ipv4.GetProtocol()));
+ 
+  fid_t fid2(std::make_tuple(ipv4.GetDestination(), tcp.GetDestinationPort(),
+                              ipv4.GetSource(), tcp.GetSourcePort(),
+                              ipv4.GetProtocol()));
+  std::map<fid_t, FlowState>::iterator fit = flow_info.find(fid1);
+  if (fit != flow_info.end()){
+    FlowState& st = fit->second;
+    if (st.rtx_timeout__timeout_cnt == cnt){
+      NS_LOG_DEBUG("TIMEOUTTTTTT " << cnt);
+      st.rtx_timeout__timer__isset = false;
+      st.rtx_timeout__val = true;
+    }
+    return;
+  }
+  fit = flow_info.find(fid2);
+  if (fit != flow_info.end()){
+    FlowState& st = fit->second;
+    if (st.rtx_timeout__timeout_cnt == cnt){
+      NS_LOG_DEBUG("TIMEOUTTTTTT " << cnt);
+      st.rtx_timeout__timer__isset = false;
+      st.rtx_timeout__val = true;
+    }
+  }
+
 }
 
 bool
