@@ -2988,6 +2988,7 @@ TcpSocketBase::Window (void) const
 {
   NS_LOG_FUNCTION (this);
   return std::min (m_rWnd.Get (), m_tcb->m_cWnd.Get ());
+  //return m_rWnd.Get ();
 }
 
 uint32_t

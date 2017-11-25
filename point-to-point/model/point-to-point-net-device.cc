@@ -670,6 +670,9 @@ PointToPointNetDevice::IsBridge (void) const
   return false;
 }
 
+void PointToPointNetDevice::RenoControl(){
+}
+
 void PointToPointNetDevice::RenoInit(FlowState& st){
   st = {
     .state = SETUP,
