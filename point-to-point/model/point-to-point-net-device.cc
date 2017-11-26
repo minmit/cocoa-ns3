@@ -978,8 +978,23 @@ void PointToPointNetDevice::rtx_timeout__timeout(Ipv4Header ipv4, TcpHeader tcp,
     FlowState& st = fit->second;
     if (st.rtx_timeout__timeout_cnt == cnt){
       NS_LOG_DEBUG("TIMEOUTTTTTT " << cnt);
+      bool prev_val = st.rtx_timeout__val;
       st.rtx_timeout__timer__isset = false;
       st.rtx_timeout__val = true;
+      if (!prev_val){
+        switch (st.cc_state){
+          case SLOW_START:
+          case AI:
+          case MD:
+          case FR:
+          case IDLE:
+            st.cc_state = START;
+            RenoControl(st.cc_state, st);
+            break;
+          default:
+            break;
+        }
+      }
     }
     return;
   }
@@ -988,8 +1003,23 @@ void PointToPointNetDevice::rtx_timeout__timeout(Ipv4Header ipv4, TcpHeader tcp,
     FlowState& st = fit->second;
     if (st.rtx_timeout__timeout_cnt == cnt){
       NS_LOG_DEBUG("TIMEOUTTTTTT " << cnt);
+      bool prev_val = st.rtx_timeout__val;
       st.rtx_timeout__timer__isset = false;
       st.rtx_timeout__val = true;
+      if (!prev_val){
+        switch (st.cc_state){
+          case SLOW_START:
+          case AI:
+          case MD:
+          case FR:
+          case IDLE:
+            st.cc_state = START;
+            RenoControl(st.cc_state, st);
+            break;
+          default:
+            break;
+        }
+      }
     }
   }
 
