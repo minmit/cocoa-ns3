@@ -493,6 +493,8 @@ private:
 private:
   bool queues_empty = true;
   uint32_t MSS = 536;
+  std::string CCState_Names[6] = {"Start", "Slow Start",
+                               "AI", "MD", "FR", "IDLE"};
 
   enum TCPState{
     SETUP,
@@ -562,6 +564,7 @@ private:
   void CoCoASched();
   void RenoInit(FlowState&);
   void CoCoAEventHandler(Ptr<Packet>, const Ipv4Header&, const TcpHeader&, FlowState&, CCEvent);
+  std::string five_tuple_str(const Ipv4Header&, const TcpHeader&, bool, bool = true);
 };
 
 } // namespace ns3

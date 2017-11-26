@@ -30,6 +30,7 @@
 #include "point-to-point-channel.h"
 #include "ppp-header.h"
 
+#include <sstream>
 
 namespace ns3 {
 
@@ -347,7 +348,7 @@ PointToPointNetDevice::TransmitComplete (void)
       CoCoAEventHandler(m_currentPkt, ipv4, tcp, st, PKT_SENT);
     }
     else{
-      NS_LOG_DEBUG("SHOULD NOT GET HERE!");
+      NS_LOG_DEBUG("ERRRRRRRRRRRRRRRRR1!");
     }
   }
   // CoCoA End
@@ -462,7 +463,7 @@ PointToPointNetDevice::Receive (Ptr<Packet> packet)
         // Check if new flow
         std::map<fid_t, FlowState>::iterator fit = flow_info.find(fid);
         if (fit == flow_info.end()){
-          NS_LOG_DEBUG("New Flow");
+          NS_LOG_DEBUG("RECEIVE| NEW FLOW: " << five_tuple_str(ipv4, tcp, true));
           FlowState s;
           RenoInit(s);
           flow_info[fid] = s;
@@ -477,7 +478,7 @@ PointToPointNetDevice::Receive (Ptr<Packet> packet)
                 uint8_t flags = tcp.GetFlags();
                 if ((flags & TcpHeader::SYN) > 0 &&
                     (flags & !(TcpHeader::SYN)) == 0){
-                  NS_LOG_DEBUG("SYN");
+                  NS_LOG_DEBUG("RECEIVE| SYN: " << five_tuple_str(ipv4, tcp, true));
                   st.setup_state = SYN;
                   st.initiator = false;
                 }
@@ -489,7 +490,7 @@ PointToPointNetDevice::Receive (Ptr<Packet> packet)
                     (flags & TcpHeader::SYN) > 0 &&
                     (flags & TcpHeader::ACK) > 0 &&
                     (flags & !(TcpHeader::SYN) & !(TcpHeader::ACK)) == 0){
-                  NS_LOG_DEBUG("SYN_ACK");
+                  NS_LOG_DEBUG("RECEIVE| SYN ACK: " << five_tuple_str(ipv4, tcp, true));
                   st.setup_state = SYN_ACK;
                 }
                 break;
@@ -499,7 +500,7 @@ PointToPointNetDevice::Receive (Ptr<Packet> packet)
                 if (!st.initiator &&
                     (flags & TcpHeader::ACK) > 0 &&
                     (flags & !(TcpHeader::ACK)) == 0){
-                  NS_LOG_DEBUG("Final Handshake ACK");
+                  NS_LOG_DEBUG("RECEIVE| HANDSHAKE ACK: " << five_tuple_str(ipv4, tcp, true));
                   st.setup_state = ACK;
                   st.state = DATA;
                 }
@@ -510,27 +511,19 @@ PointToPointNetDevice::Receive (Ptr<Packet> packet)
             }
           }
           case DATA:{
-            uint16_t data_size = ipv4.GetPayloadSize() - tcp.GetLength() * 4;
-            if (data_size > 0){
-              NS_LOG_DEBUG("Payload size " << data_size);
-            }
-            else{
-              NS_LOG_DEBUG("No Payload");
-            }
             uint8_t flags = tcp.GetFlags();
             if ((flags & TcpHeader::ACK) > 0){
               CoCoAEventHandler(packet, ipv4, tcp, st, ACK_RCVD);
             }
+            else{
+              NS_LOG_DEBUG("RECEIVE| DATA: " << five_tuple_str(ipv4, tcp, true));
+            }
             break;
           }
           case TEAR_DOWN:
+            NS_LOG_DEBUG("RECEIVE| TEAR DOWN: " << five_tuple_str(ipv4, tcp, true));
             break;
         }
-        NS_LOG_DEBUG("TCP Header " << tcp);
-        NS_LOG_DEBUG("five tuple " << ipv4.GetSource() << " " <<
-                    tcp.GetSourcePort() << " " << ipv4.GetDestination() <<
-                " " << tcp.GetDestinationPort() << " " << ipv4.GetProtocol());
-        NS_LOG_DEBUG("---------------------------");
       }
        
       // CoCoA End
@@ -704,6 +697,8 @@ void PointToPointNetDevice::RenoControl(CCState s, FlowState& st){
     case IDLE:{
     }
   }
+  NS_LOG_DEBUG("RENO CONTROL| WINDOW SIZE: " << st.cm_window_size <<
+                            " State: " << CCState_Names[st.cc_state]);
 }
 
 void PointToPointNetDevice::RenoInit(FlowState& st){
@@ -729,16 +724,17 @@ void PointToPointNetDevice::RenoInit(FlowState& st){
 
 void PointToPointNetDevice::CoCoASched(){
   typedef std::tuple<Ipv4Address, uint16_t, Ipv4Address, uint16_t, uint8_t> fid_t;
-  NS_LOG_DEBUG("In CoCoA Sched");
   std::map<fid_t, FlowState>::iterator it;
   int32_t qlen = -1;
-  bool queue_full = false;
-  while ((int32_t)m_queue->GetNPackets() > qlen && !queue_full){
+  bool m_queue_full = false;
+  uint32_t queues_occ;
+
+  while ((int32_t)m_queue->GetNPackets() > qlen && !m_queue_full){
     qlen = m_queue->GetNPackets();
+    queues_occ = 0;
     for (it = flow_info.begin(); it != flow_info.end(); it++){
       FlowState& st = it->second;
-      NS_LOG_DEBUG("flow info: queue size " << st.queue.size() <<
-                   " window start/size " << st.cm_start << "/" << st.cm_window_size);
+      queues_occ += st.queue.size();
       if (!st.queue.empty()){
         Ptr<Packet> p = st.queue.front();
 
@@ -759,10 +755,11 @@ void PointToPointNetDevice::CoCoASched(){
           bool res = m_queue->Enqueue(p);
           if (res){
               st.queue.pop();
+              queues_occ--;
               CoCoAEventHandler(p, ipv4, tcp, st, PKT_DEQ);
           }
           else{
-            queue_full = true;
+            m_queue_full = true;
             break;
           }
         }
@@ -770,10 +767,8 @@ void PointToPointNetDevice::CoCoASched(){
     }
   }
 
-  NS_LOG_DEBUG("m_queue length " << m_queue->GetNPackets());
-
-  queues_empty = !queue_full;
-  if (queue_full){
+  queues_empty = (queues_occ == 0);
+  if (!queues_empty){
     Simulator::Schedule(NanoSeconds(1), &PointToPointNetDevice::CoCoASched, this);
   }
   //
@@ -783,7 +778,6 @@ void PointToPointNetDevice::CoCoASched(){
     Ptr<Packet> packet = m_queue->Dequeue ();
     m_snifferTrace (packet);
     m_promiscSnifferTrace (packet);
-    NS_LOG_DEBUG("starting to transmit packet");
     TransmitStart (packet);
   }
 }
@@ -793,13 +787,12 @@ void PointToPointNetDevice::CoCoAEventHandler(Ptr<Packet> packet,
                                  const TcpHeader& tcp,
                                  FlowState& st,
                                  CCEvent ev){
-  NS_LOG_DEBUG("RENO");
-  
   switch(ev){
     case PKT_ENQ:{
       // CM Code
       st.queue.push(packet);
-      NS_LOG_DEBUG("PKT ENQ");
+      NS_LOG_DEBUG("SEND| PKT ENQ: " << five_tuple_str(ipv4, tcp, false)
+                                     << " - Queue Length: " << st.queue.size());
       // Event Code
       if (queues_empty){
         queues_empty = false;
@@ -808,11 +801,12 @@ void PointToPointNetDevice::CoCoAEventHandler(Ptr<Packet> packet,
       break;
     }
     case PKT_DEQ:{
-      NS_LOG_DEBUG("PKT_DEQ");
+      NS_LOG_DEBUG("SEND| PKT DEQ: " << five_tuple_str(ipv4, tcp, false)
+                                     << " - Queue Length: " << st.queue.size());
       break;
     }
     case PKT_SENT:{
-      NS_LOG_DEBUG("PKT_SENT");
+      NS_LOG_DEBUG("SEND| PKT SENT: " << five_tuple_str(ipv4, tcp, false));
       uint16_t data_size = ipv4.GetPayloadSize() - tcp.GetLength() * 4;
       uint32_t sent = tcp.GetSequenceNumber().GetValue() + data_size;
       if (sent > st.max_sent__val){
@@ -827,13 +821,14 @@ void PointToPointNetDevice::CoCoAEventHandler(Ptr<Packet> packet,
         Simulator::Schedule(st.rtx_timeout__timer_delay, 
             &PointToPointNetDevice::rtx_timeout__timeout, this, 
                                                ipv4, tcp, st.rtx_timeout__timeout_cnt);
-        NS_LOG_DEBUG("event id " << st.rtx_timeout__timeout_cnt);
+        NS_LOG_DEBUG("RENO| TIME OUT " << st.rtx_timeout__timeout_cnt << " Scheduled for " 
+                                       << five_tuple_str(ipv4, tcp, false, false));
       }
 
       break;
     }
     case ACK_RCVD:{
-      NS_LOG_DEBUG("ACK_RCVD");
+      NS_LOG_DEBUG("RECEIVE| ACK RCVD: " << five_tuple_str(ipv4, tcp, true));
       uint32_t ack = tcp.GetAckNumber().GetValue();
       if (ack > st.cm_start){
         st.cm_start = ack;
@@ -870,8 +865,8 @@ void PointToPointNetDevice::CoCoAEventHandler(Ptr<Packet> packet,
         st.rtx_timeout__timeout_cnt++;
         Simulator::Schedule(st.rtx_timeout__timer_delay, &PointToPointNetDevice::rtx_timeout__timeout, 
                                                 this, ipv4, tcp, st.rtx_timeout__timeout_cnt);
-        NS_LOG_DEBUG("event id " << st.rtx_timeout__timeout_cnt);
-
+        NS_LOG_DEBUG("RENO| TIME OUT " << st.rtx_timeout__timeout_cnt << " Scheduled for " 
+                                       << five_tuple_str(ipv4, tcp, true, false));
       }
       bool transitioned = true;
       // ASM
@@ -963,6 +958,28 @@ void PointToPointNetDevice::CoCoAEventHandler(Ptr<Packet> packet,
                " max_sent " << st.max_sent__val); */
 }
 
+std::string PointToPointNetDevice::five_tuple_str(const Ipv4Header& ipv4, 
+                                                  const TcpHeader& tcp,
+                                                  bool flip,
+                                                  bool payload_size){
+  std::ostringstream res;
+  if (flip){
+    res << "(" << ipv4.GetDestination() << " " 
+        << tcp.GetDestinationPort() << " " << ipv4.GetSource() 
+        << " " << tcp.GetSourcePort() << " " << (int)ipv4.GetProtocol() << ")";
+  }
+  else{
+    res << "(" << ipv4.GetSource() << " " 
+        << tcp.GetSourcePort() << " " << ipv4.GetDestination() 
+        << " " << tcp.GetDestinationPort() << " " << (int)ipv4.GetProtocol() << ")";
+  } 
+  if (payload_size){
+    uint16_t data_size = ipv4.GetPayloadSize() - tcp.GetLength() * 4;
+    res << " " << data_size << " Bytes"; 
+  }
+  return res.str();
+}
+
 void PointToPointNetDevice::rtx_timeout__timeout(Ipv4Header ipv4, TcpHeader tcp, uint32_t cnt){
   typedef std::tuple<Ipv4Address, uint16_t, Ipv4Address, uint16_t, uint8_t> fid_t;
   //TODO: FIXME
@@ -977,7 +994,7 @@ void PointToPointNetDevice::rtx_timeout__timeout(Ipv4Header ipv4, TcpHeader tcp,
   if (fit != flow_info.end()){
     FlowState& st = fit->second;
     if (st.rtx_timeout__timeout_cnt == cnt){
-      NS_LOG_DEBUG("TIMEOUTTTTTT " << cnt);
+      NS_LOG_DEBUG("TIMEOUT| ID: " << cnt);
       bool prev_val = st.rtx_timeout__val;
       st.rtx_timeout__timer__isset = false;
       st.rtx_timeout__val = true;
@@ -1002,7 +1019,7 @@ void PointToPointNetDevice::rtx_timeout__timeout(Ipv4Header ipv4, TcpHeader tcp,
   if (fit != flow_info.end()){
     FlowState& st = fit->second;
     if (st.rtx_timeout__timeout_cnt == cnt){
-      NS_LOG_DEBUG("TIMEOUTTTTTT " << cnt);
+      NS_LOG_DEBUG("TIMEOUT| ID: " << cnt);
       bool prev_val = st.rtx_timeout__val;
       st.rtx_timeout__timer__isset = false;
       st.rtx_timeout__val = true;
@@ -1078,7 +1095,7 @@ PointToPointNetDevice::Send (
     // Check if new flow
     std::map<fid_t, FlowState>::iterator fit = flow_info.find(fid);
     if (fit == flow_info.end()){
-      NS_LOG_DEBUG("New Flow");
+      NS_LOG_DEBUG("SEND| NEW FLOW: " << five_tuple_str(ipv4, tcp, false));
       FlowState s;
       RenoInit(s);
       flow_info[fid] = s;
@@ -1094,6 +1111,7 @@ PointToPointNetDevice::Send (
             uint8_t flags = tcp.GetFlags();
             if ((flags & TcpHeader::SYN) > 0 &&
                 (flags & !(TcpHeader::SYN)) == 0){
+              NS_LOG_DEBUG("SEND| SYN: " << five_tuple_str(ipv4, tcp, false));
               st.initiator = true;
               st.setup_state = SYN;
               st.init_seq = tcp.GetSequenceNumber();
@@ -1107,6 +1125,7 @@ PointToPointNetDevice::Send (
                 (flags & TcpHeader::SYN) > 0 &&
                 (flags & TcpHeader::ACK) > 0 &&
                 (flags & !(TcpHeader::SYN) & !(TcpHeader::ACK)) == 0){
+              NS_LOG_DEBUG("SEND| SYN ACK: " << five_tuple_str(ipv4, tcp, false));
               st.setup_state = SYN_ACK;
               st.init_seq = tcp.GetSequenceNumber();
               st.cm_start = st.init_seq.GetValue();
@@ -1118,7 +1137,8 @@ PointToPointNetDevice::Send (
             if (st.initiator &&
                 (flags & TcpHeader::ACK) > 0 &&
                 (flags & !(TcpHeader::ACK)) == 0){
-              NS_LOG_DEBUG("Final Handshake ACK: Init seq is " << st.init_seq);
+              NS_LOG_DEBUG("SEND| HANDSHAKE ACK: " << five_tuple_str(ipv4, tcp, false)
+                                                   << " Init SEQ " << st.init_seq);
               st.setup_state = ACK;
               st.state = DATA;
             }
@@ -1133,7 +1153,6 @@ PointToPointNetDevice::Send (
         uint8_t flags = tcp.GetFlags();
         uint16_t data_size = ipv4.GetPayloadSize() - tcp.GetLength() * 4;
         if (data_size > 0){
-          NS_LOG_DEBUG("Payload size " << data_size);
           CoCoAEventHandler(packet, ipv4, tcp, st, PKT_ENQ);
           break;
         }
@@ -1164,15 +1183,11 @@ PointToPointNetDevice::Send (
         }
       }
       case TEAR_DOWN:{
-        NS_LOG_DEBUG("In Tear Down");
+        NS_LOG_DEBUG("SEND| TEAR DOWN " << five_tuple_str(ipv4, tcp, false));
       }
     }
   
-    NS_LOG_DEBUG("TCP Header " << tcp);
-    NS_LOG_DEBUG("five tuple " << ipv4.GetSource() << " " <<
-                tcp.GetSourcePort() << " " << ipv4.GetDestination() <<
-                " " << tcp.GetDestinationPort() << " " << ipv4.GetProtocol());
-    NS_LOG_DEBUG("---------------------------");
+    
     if (cur_st != DATA){
       // We should enqueue and dequeue the packet to hit the tracing hooks.
       //
