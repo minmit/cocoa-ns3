@@ -557,11 +557,11 @@ private:
 
   std::map<std::tuple<Ipv4Address, uint16_t, Ipv4Address, uint16_t, uint8_t>, FlowState> flow_info;
 
-  void RenoControl();
+  void RenoControl(CCState, FlowState&);
   void rtx_timeout__timeout(Ipv4Header, TcpHeader, uint32_t);
   void CoCoASched();
   void RenoInit(FlowState&);
-  void Reno(Ptr<Packet>, const Ipv4Header&, const TcpHeader&, FlowState&, CCEvent);
+  void CoCoAEventHandler(Ptr<Packet>, const Ipv4Header&, const TcpHeader&, FlowState&, CCEvent);
 };
 
 } // namespace ns3

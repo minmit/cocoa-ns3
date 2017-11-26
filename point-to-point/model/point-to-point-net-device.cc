@@ -344,7 +344,7 @@ PointToPointNetDevice::TransmitComplete (void)
     // Check for sender-size info Payload if Data or SYN or FIN
     if (fit != flow_info.end()){
       FlowState& st = fit->second;
-      Reno(m_currentPkt, ipv4, tcp, st, PKT_SENT);
+      CoCoAEventHandler(m_currentPkt, ipv4, tcp, st, PKT_SENT);
     }
     else{
       NS_LOG_DEBUG("SHOULD NOT GET HERE!");
@@ -519,7 +519,7 @@ PointToPointNetDevice::Receive (Ptr<Packet> packet)
             }
             uint8_t flags = tcp.GetFlags();
             if ((flags & TcpHeader::ACK) > 0){
-              Reno(packet, ipv4, tcp, st, ACK_RCVD);
+              CoCoAEventHandler(packet, ipv4, tcp, st, ACK_RCVD);
             }
             break;
           }
@@ -670,7 +670,40 @@ PointToPointNetDevice::IsBridge (void) const
   return false;
 }
 
-void PointToPointNetDevice::RenoControl(){
+void PointToPointNetDevice::RenoControl(CCState s, FlowState& st){
+  switch(s){
+    case START:{
+      st.cc_tmp_win = 1;
+      st.cm_window_size = 1;
+      st.cc_recovery_seq = st.max_sent__val;
+      st.cc_ss_threshold /= 2;
+      break;
+    }
+    case SLOW_START:{
+      st.cc_tmp_win += 1;
+      st.cm_window_size += 1;
+      break;
+    }
+    case AI:{
+      st.cm_window_size = st.cc_tmp_win;
+      st.cm_window_size += 1 / st.cm_window_size;
+      st.cc_tmp_win += 1 / st.cc_tmp_win;
+      break;
+    }
+    case MD:{
+      st.cc_recovery_seq = st.max_sent__val;
+      st.cc_tmp_win = st.cm_window_size / 2;
+      st.cc_ss_threshold = st.cc_tmp_win; 
+      st.cm_window_size = st.cc_tmp_win + st.dup_acks__val;
+      break;
+    }
+    case FR:{
+      st.cm_window_size = st.cc_tmp_win + st.dup_acks__val;
+      break;
+    }
+    case IDLE:{
+    }
+  }
 }
 
 void PointToPointNetDevice::RenoInit(FlowState& st){
@@ -678,7 +711,7 @@ void PointToPointNetDevice::RenoInit(FlowState& st){
     .state = SETUP,
     .setup_state = NONE,
     .cc_state = START,
-    .cc_ss_threshold = 20,
+    .cc_ss_threshold = 65536 * 2,
     .cm_window_size = 1,
     .max_ack__val = 0,
     .new_ack__val = 0,
@@ -726,7 +759,7 @@ void PointToPointNetDevice::CoCoASched(){
           bool res = m_queue->Enqueue(p);
           if (res){
               st.queue.pop();
-              Reno(p, ipv4, tcp, st, PKT_DEQ);
+              CoCoAEventHandler(p, ipv4, tcp, st, PKT_DEQ);
           }
           else{
             queue_full = true;
@@ -755,7 +788,7 @@ void PointToPointNetDevice::CoCoASched(){
   }
 }
 
-void PointToPointNetDevice::Reno(Ptr<Packet> packet,
+void PointToPointNetDevice::CoCoAEventHandler(Ptr<Packet> packet,
                                  const Ipv4Header& ipv4,
                                  const TcpHeader& tcp,
                                  FlowState& st,
@@ -839,6 +872,87 @@ void PointToPointNetDevice::Reno(Ptr<Packet> packet,
                                                 this, ipv4, tcp, st.rtx_timeout__timeout_cnt);
         NS_LOG_DEBUG("event id " << st.rtx_timeout__timeout_cnt);
 
+      }
+      bool transitioned = true;
+      // ASM
+      switch(st.cc_state){
+        case START:{
+          if (st.new_ack__val == 1){
+            st.cc_state = SLOW_START;
+          }
+          else transitioned = false;
+          break;
+        }
+        case SLOW_START:{
+          if(st.new_ack__val == 1){
+            if(st.cm_window_size < st.cc_ss_threshold){
+              st.cc_state = SLOW_START;
+            }
+            else{
+              st.cc_state = AI;
+            }
+          }
+          else if (st.dup_acks__val == 3){
+            if (st.max_ack__val > st.cc_recovery_seq){
+              st.cc_state = MD;
+            }
+            else{
+              st.cc_state = IDLE;
+            }
+          }
+          else transitioned = false;
+          break;
+        }
+        case AI:{
+          if (st.new_ack__val == 1){
+            st.cc_state = AI;
+          }
+          else if (st.dup_acks__val == 3){
+            if (st.max_ack__val > st.cc_recovery_seq){
+              st.cc_state = MD;
+            }
+            else{
+              st.cc_state = IDLE;
+            }
+          }
+          else transitioned = false;
+          break;
+        }
+        case MD:{
+          if (st.new_ack__val == 1){
+            st.cc_state = AI;
+          }
+          else if (st.dup_acks__val > 0){
+            st.cc_state = FR;
+          }
+          else transitioned = false;
+          break;
+        }
+        case FR:{
+          if (st.new_ack__val == 1){
+            st.cc_state = AI;
+          }
+          else if (st.dup_acks__val > 0){
+            st.cc_state = FR;
+          }
+          else transitioned = false;
+          break;
+        }
+        case IDLE:{
+          if(st.new_ack__val == 1){
+            if(st.cm_window_size < st.cc_ss_threshold){
+              st.cc_state = SLOW_START;
+            }
+            else{
+              st.cc_state = AI;
+            }
+          }
+          else transitioned = false;
+          break;
+        }
+      }
+      if (transitioned){
+        RenoControl(st.cc_state, st);
       }
       break;
     }
@@ -990,7 +1104,7 @@ PointToPointNetDevice::Send (
         uint16_t data_size = ipv4.GetPayloadSize() - tcp.GetLength() * 4;
         if (data_size > 0){
           NS_LOG_DEBUG("Payload size " << data_size);
-          Reno(packet, ipv4, tcp, st, PKT_ENQ);
+          CoCoAEventHandler(packet, ipv4, tcp, st, PKT_ENQ);
           break;
         }
         else if ((flags & TcpHeader::FIN) != 0){
