@@ -23,6 +23,7 @@
 #include <map>
 #include <tuple>
 #include <queue>
+#include <vector>
 
 #include "ns3/address.h"
 #include "ns3/node.h"
@@ -495,6 +496,7 @@ private:
   uint32_t MSS = 536;
   std::string CCState_Names[6] = {"Start", "Slow Start",
                                "AI", "MD", "FR", "IDLE"};
+  uint16_t CC_LATENCY = 0;
 
   enum TCPState{
     SETUP,
@@ -525,8 +527,19 @@ private:
     ACK_RCVD,
   };
 
+  class pktPairComp{
+    public:
+    bool operator() (const std::pair<Ptr<Packet>, uint32_t>& lhs, 
+                     const std::pair<Ptr<Packet>, uint32_t>& rhs) const
+    {
+      return lhs.second > rhs.second;
+    }
+  };
+
   struct FlowState{
-    std::queue<Ptr<Packet> > queue;
+    std::priority_queue<std::pair<Ptr<Packet>, uint32_t>, 
+                        std::vector<std::pair<Ptr<Packet>, uint32_t>>,
+                        pktPairComp> queue;
     TCPState state;
     TCPSetupState setup_state;
     bool initiator;
@@ -559,7 +572,9 @@ private:
 
   std::map<std::tuple<Ipv4Address, uint16_t, Ipv4Address, uint16_t, uint8_t>, FlowState> flow_info;
 
-  void RenoControl(CCState, FlowState&);
+  bool SetCCLatency(uint16_t);
+  uint16_t GetCCLatency() const;
+  void RenoControl(CCState, std::tuple<Ipv4Address, uint16_t, Ipv4Address, uint16_t, uint8_t>);
   void rtx_timeout__timeout(Ipv4Header, TcpHeader, uint32_t);
   void CoCoASched();
   void RenoInit(FlowState&);

@@ -71,6 +71,13 @@ PointToPointNetDevice::GetTypeId (void)
                    MakeTimeAccessor (&PointToPointNetDevice::m_tInterframeGap),
                    MakeTimeChecker ())
 
+    //COCOA
+    .AddAttribute ("CCLatency",
+                   "The latency of the control loop",
+                   UintegerValue(0),
+                   MakeUintegerAccessor(&PointToPointNetDevice::SetCCLatency,
+                                        &PointToPointNetDevice::GetCCLatency),
+                  MakeUintegerChecker<uint16_t>())
     //
     // Transmit queueing discipline for the device which includes its own set
     // of trace hooks.
@@ -351,6 +358,18 @@ PointToPointNetDevice::TransmitComplete (void)
       NS_LOG_DEBUG(GetNode()->GetId() << " ERRRRRRRRRRRRRRRRR1!");
     }
   }
+  else{
+    PppHeader phdr;
+    m_currentPkt->RemoveHeader(phdr);
+    Ipv4Header ipv4;
+    m_currentPkt->RemoveHeader(ipv4);
+    TcpHeader tcp;
+    m_currentPkt->PeekHeader(tcp);
+    m_currentPkt->AddHeader(ipv4);
+    m_currentPkt->AddHeader(phdr);
+
+    NS_LOG_DEBUG(GetNode()->GetId() << " SEND| PKT SENT: " << five_tuple_str(ipv4, tcp, false));
+  }
   // CoCoA End
   
   m_currentPkt = 0;
@@ -579,6 +598,7 @@ PointToPointNetDevice::GetChannel (void) const
   return m_channel;
 }
 
+
 //
 // This is a point-to-point device, so we really don't need any kind of address
 // information.  However, the base class NetDevice wants us to define the
@@ -670,7 +690,17 @@ PointToPointNetDevice::IsBridge (void) const
   return false;
 }
 
-void PointToPointNetDevice::RenoControl(CCState s, FlowState& st){
+void PointToPointNetDevice::RenoControl(CCState s, std::tuple<Ipv4Address, uint16_t, Ipv4Address, uint16_t, uint8_t> fid){
+  typedef std::tuple<Ipv4Address, uint16_t, Ipv4Address, uint16_t, uint8_t> fid_t;
+  
+  // Check if new flow
+  std::map<fid_t, FlowState>::iterator fit = flow_info.find(fid);
+  if (fit == flow_info.end()){
+    NS_LOG_DEBUG(GetNode()->GetId() << " SEND| ERROR in control loop");
+  }
+
+  FlowState& st = fit->second;
+
   switch(s){
     case START:{
       st.cc_tmp_win = 1;
@@ -746,7 +776,7 @@ void PointToPointNetDevice::CoCoASched(){
       FlowState& st = it->second;
       queues_occ += st.queue.size();
       if (!st.queue.empty()){
-        Ptr<Packet> p = st.queue.front();
+        Ptr<Packet> p = st.queue.top().first;
 
         PppHeader phdr;
         p->RemoveHeader(phdr);
@@ -762,9 +792,21 @@ void PointToPointNetDevice::CoCoASched(){
 
         NS_LOG_DEBUG(GetNode()->GetId() << " CM " << seq << " " << data_size << " " << st.cm_start << " " << st.cm_window_size * MSS );
         if (seq < st.cm_start){
-          st.queue.pop();
-          queues_occ--;
-          CoCoAEventHandler(p, ipv4, tcp, st, PKT_DEQ);
+          
+          while(!st.queue.empty() && seq < st.cm_start){
+            st.queue.pop();
+            queues_occ--;
+            CoCoAEventHandler(p, ipv4, tcp, st, PKT_DEQ);
+          
+            p = st.queue.top().first;
+            p->RemoveHeader(phdr);
+            p->RemoveHeader(ipv4);
+            p->PeekHeader(tcp);
+            p->AddHeader(ipv4);
+            p->AddHeader(phdr);
+
+            seq = tcp.GetSequenceNumber().GetValue();
+          }
         }
         else if ((seq >= st.cm_start) && 
             (seq + data_size <= st.cm_start + st.cm_window_size * MSS)){
@@ -805,7 +847,7 @@ void PointToPointNetDevice::CoCoAEventHandler(Ptr<Packet> packet,
   switch(ev){
     case PKT_ENQ:{
       // CM Code
-      st.queue.push(packet);
+      st.queue.push(std::make_pair(packet, tcp.GetSequenceNumber().GetValue()));
       NS_LOG_DEBUG(GetNode()->GetId() << " SEND| PKT ENQ: " << five_tuple_str(ipv4, tcp, false)
                                      << " - Queue Length: " << st.queue.size());
       // Event Code
@@ -963,7 +1005,21 @@ void PointToPointNetDevice::CoCoAEventHandler(Ptr<Packet> packet,
         }
       }
       if (transitioned){
-        RenoControl(st.cc_state, st);
+        typedef std::tuple<Ipv4Address, uint16_t, Ipv4Address, uint16_t, uint8_t> fid_t;
+        
+        // Compute FID. Assuming that all packets going out are from
+        // IP address on this machine, we can avoid sorting the addresses
+        // and always put the local side first and the remote side second
+        // something to change later (TODO).
+        fid_t fid(std::make_tuple(ipv4.GetDestination(), tcp.GetDestinationPort(),
+                                  ipv4.GetSource(), tcp.GetSourcePort(),
+                                  ipv4.GetProtocol()));
+        if (CC_LATENCY>0){
+          Simulator::Schedule(MicroSeconds(CC_LATENCY), &PointToPointNetDevice::RenoControl, this, st.cc_state, fid);
+        }
+        else{
+          RenoControl(st.cc_state, fid);
+        }
       }
       break;
     }
@@ -1023,7 +1079,12 @@ void PointToPointNetDevice::rtx_timeout__timeout(Ipv4Header ipv4, TcpHeader tcp,
           case FR:
           case IDLE:
             st.cc_state = START;
-            RenoControl(st.cc_state, st);
+            if (CC_LATENCY > 0){
+              Simulator::Schedule(MicroSeconds(CC_LATENCY), &PointToPointNetDevice::RenoControl, this, st.cc_state, fid1);
+            }
+            else{
+              RenoControl(st.cc_state, fid1);
+            }
             break;
           default:
             break;
@@ -1048,7 +1109,12 @@ void PointToPointNetDevice::rtx_timeout__timeout(Ipv4Header ipv4, TcpHeader tcp,
           case FR:
           case IDLE:
             st.cc_state = START;
-            RenoControl(st.cc_state, st);
+            if (CC_LATENCY > 0){
+              Simulator::Schedule(MicroSeconds(CC_LATENCY), &PointToPointNetDevice::RenoControl, this, st.cc_state, fid2);
+            }
+            else{
+              RenoControl(st.cc_state, fid2);
+            }
             break;
           default:
             break;
@@ -1347,6 +1413,18 @@ PointToPointNetDevice::GetMtu (void) const
 {
   NS_LOG_FUNCTION (this);
   return m_mtu;
+}
+
+bool
+PointToPointNetDevice::SetCCLatency(uint16_t x)
+{
+  CC_LATENCY = x;
+  return true;
+}
+
+uint16_t
+PointToPointNetDevice::GetCCLatency(void) const{
+  return CC_LATENCY;
 }
 
 uint16_t
